@@ -30,7 +30,7 @@
 |---|---|---|---|
 | 智谱 GLM（默认） | glm-4-flash | 永久免费，每天 100 万 token | 国内用户首选，国内直连不用代理 |
 | 硅基流动 | Qwen/Qwen3-8B | Qwen3-8B 等模型永久免费；新用户送 2000 万 token | 国内用户，喜欢换模型玩 |
-| Gemini | gemini-2.5-flash | 免费，每天 250 次 | 有 Google 账号、能访问 Google 的用户 |
+| Gemini | gemini-3.8-flash | 免费，每天 250 次 | 有 Google 账号、能访问 Google 的用户 |
 | Claude | claude-haiku-4-5 | 按量付费，新账号一般有 $5 免费额度 | 追求文案质量，愿意付费的用户 |
 
 ### Key 领取地址

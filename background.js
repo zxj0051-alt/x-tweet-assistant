@@ -10,7 +10,7 @@
 const DEFAULT_SETTINGS = {
   provider: 'glm', // glm | siliconflow | gemini | claude
   geminiKey: '',
-  geminiModel: 'gemini-2.5-flash',
+  geminiModel: 'gemini-3.8-flash',
   claudeKey: '',
   claudeModel: 'claude-haiku-4-5',
   glmKey: '',
@@ -120,7 +120,9 @@ function fetchWithTimeout(url, options, ms) {
 async function callGemini(task, payload, settings, count) {
   if (!settings.geminiKey) return { ok: false, error: '请先在设置里填 Gemini API Key（Google AI Studio 免费领取）' };
   const { sys, user, styles } = buildPrompts(task, payload, settings, count);
-  const model = (settings.geminiModel || 'gemini-2.5-flash').trim();
+  let model = (settings.geminiModel || 'gemini-3.8-flash').trim();
+  // 旧版默认模型 gemini-2.5-flash 已下线（新用户不可用），已存的旧值自动改用新模型
+  if (model === 'gemini-2.5-flash') model = 'gemini-3.8-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(settings.geminiKey)}`;
   const res = await fetchWithTimeout(url, {
     method: 'POST',

@@ -4,7 +4,7 @@
 const DEFAULT_SETTINGS = {
   provider: 'glm',
   geminiKey: '',
-  geminiModel: 'gemini-2.5-flash',
+  geminiModel: 'gemini-3.8-flash',
   claudeKey: '',
   claudeModel: 'claude-haiku-4-5',
   glmKey: '',
