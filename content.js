@@ -20,15 +20,29 @@
   let replyStyles = []; // 每条回复草稿对应的风格（与 replyDrafts 下标对应）
   let trendingDrafts = []; // 当前热门文案
   let trendingContext = null; // { topics: [], tweets: [] }
-  let scrapedTopics = []; // 刚从 X 抓到的热搜话题
+  let scrapedTopics = []; // 刚从 X 抓到的热搜话题 + 推文关键词
   let customHotWords = []; // 用户自己添加的热词（存在 chrome.storage.sync）
   let selectedHotWords = new Set(); // 当前选中的热词
   let generating = false;
+  let replyAngles = []; // 每条回复草稿对应的角度（与 replyDrafts 下标对应）
+  let panelLanguage = 'zh'; // 面板语言选择（存在 chrome.storage.sync，和设置页共用 language 键）
+  let panelHumanFeel = false; // 真人感开关
+  let panelGrowthMode = false; // 涨粉模式开关
+  let panelHook = '悬念'; // 热门文案开头钩子
+  let panelThread = false; // 热门文案是否写成 thread
+  let topicSuggestions = []; // 今日选题列表（展示用）
+  let suggestedTopics = []; // 从选题里点出来的热词（显示为虚线 chip）
 
-  // 启动时读出用户保存的热词
+  // 启动时读出用户保存的热词和面板偏好（语言、真人感、涨粉模式、钩子、thread）
   try {
-    chrome.storage.sync.get({ customHotWords: [] }, (items) => {
+    chrome.storage.sync.get({ customHotWords: [], language: 'zh', humanFeel: false, growthMode: false, hook: '悬念', thread: false }, (items) => {
       customHotWords = Array.isArray(items.customHotWords) ? items.customHotWords.filter(Boolean) : [];
+      panelLanguage = items.language === 'en' ? 'en' : 'zh';
+      panelHumanFeel = !!items.humanFeel;
+      panelGrowthMode = !!items.growthMode;
+      panelHook = items.hook || '悬念';
+      panelThread = !!items.thread;
+      syncPanelPrefs();
       renderHotwordChips();
     });
   } catch (e) { /* 忽略 */ }
@@ -58,9 +72,9 @@
       .replace(/"/g, '&quot;');
   }
 
-  // 推文去重 key：句柄 + 正文前 80 字
+  // 推文去重 key：句柄 + 正文前 80 字 + 首张配图（纯图推文没有文字，靠图区分）
   function tweetKey(t) {
-    return (t.handle || '') + '|' + (t.text || '').slice(0, 80);
+    return (t.handle || '') + '|' + (t.text || '').slice(0, 80) + '|' + ((t.images || [])[0] || '');
   }
 
   function formatCount(n) {
@@ -100,7 +114,31 @@
     }
 
     if (!text && !author && !handle) return null;
-    return { author, handle, text };
+    return { author, handle, text, images: extractTweetImages(article) };
+  }
+
+  // 抓推文配图：优先取 data-testid="tweetPhoto" 里的 img；fallback 再从 article 里找
+  // pbs.twimg.com/media 的大图（排除头像 profile_images 和小图）。最多 2 张，
+  // 原图链接把 name=small 换成 name=large，让视觉模型看得更清楚。
+  function extractTweetImages(article) {
+    const urls = [];
+    const push = (src) => {
+      if (!src || urls.includes(src) || urls.length >= 2) return;
+      urls.push(src.replace(/([?&])name=\w+/, '$1name=large'));
+    };
+    if (!article) return urls;
+    article.querySelectorAll('[data-testid="tweetPhoto"] img').forEach((img) => {
+      push(img.getAttribute('src') || img.currentSrc || '');
+    });
+    if (urls.length) return urls;
+    article.querySelectorAll('img').forEach((img) => {
+      const src = img.getAttribute('src') || '';
+      if (!src || /profile_images/.test(src)) return;
+      if (img.closest('[data-testid="User-Avatar"], [data-testid="Tweet-User-Avatar"]')) return;
+      if (!/pbs\.twimg\.com\/(media|tweet_video_thumb)/.test(src)) return;
+      push(src);
+    });
+    return urls;
   }
 
   // 详情页（x.com/<handle>/status/<id>）的主推文一般是页面上第一条 article
@@ -134,20 +172,30 @@
   // 一个 trend 元素的 innerText 通常是三行：
   //   分类行（如“商业・金融 · 趋势”）/ 真正的话题名 / 帖子数（如“1.2万 条帖子”）
   // 以前取第 1 行，拿到的是分类（商业・金融、日本、美食……），不是话题本身；
-  // 现在跳过分类行和帖子数行，取真正的话题名。
+  // 现在跳过分类行和帖子数行，取真正的话题名，并按帖子数从高到低排序，最热的排前面。
   function pickTopicLine(lines) {
     return lines.find((l) => !/趋势|Trending/i.test(l) && !/帖子|Posts/i.test(l) && !/^[\d,.]+[KkMm万]?/.test(l) && l.length > 1) || lines[0];
   }
 
+  // 从 trend 元素的各行里找帖子数行（如“1.2万 条帖子”/“12.3K posts”），解析成数字
+  function pickPostCount(lines) {
+    const line = lines.find((l) => /帖子|Posts/i.test(l));
+    return line ? parseCount(line) : 0;
+  }
+
   function extractTrendingTopics() {
-    const topics = [];
+    const found = new Map(); // 话题名 -> 帖子数（同一话题出现多次时取最大的）
+    const add = (topic, posts) => {
+      if (!topic || topic.length <= 1) return;
+      const prev = found.get(topic);
+      if (prev === undefined || posts > prev) found.set(topic, posts);
+    };
     // 首选：data-testid="trend" 的词条
     document.querySelectorAll('[data-testid="trend"]').forEach((el) => {
       const lines = (el.innerText || '').split('\n').map((s) => s.trim()).filter(Boolean);
-      const topic = pickTopicLine(lines);
-      if (topic && !topics.includes(topic)) topics.push(topic);
+      add(pickTopicLine(lines), pickPostCount(lines));
     });
-    if (topics.length) return topics;
+    if (found.size) return [...found.entries()].sort((a, b) => b[1] - a[1]).map(([topic]) => topic);
 
     // fallback：在“正在发生 / What's happening”标题附近找链接文本
     const headings = Array.from(document.querySelectorAll('h2, span')).filter((el) => {
@@ -159,12 +207,43 @@
       if (!container) continue;
       container.querySelectorAll('a, [role="link"]').forEach((a) => {
         const lines = (a.innerText || '').split('\n').map((s) => s.trim()).filter(Boolean);
-        const topic = pickTopicLine(lines);
-        if (topic && topic.length > 1 && !topics.includes(topic)) topics.push(topic);
+        add(pickTopicLine(lines), pickPostCount(lines));
       });
-      if (topics.length) break;
+      if (found.size) break;
     }
-    return topics;
+    return [...found.entries()].sort((a, b) => b[1] - a[1]).map(([topic]) => topic);
+  }
+
+  // 从高互动推文里提关键词：hashtag + 高频实词（去掉停用词、URL、@提及），按出现次数排序。
+  // 用来补热搜栏抓不到的“当下正在聊”的词。
+  const KEYWORD_STOPWORDS = new Set(('的 了 在 是 我 有 和 就 不 你 都 也 还 这 那 他 她 它 我们 你们 他们 一个 没有 什么 怎么 可以 这个 那个 就是 但是 因为 所以 如果 还是 不是 不要 现在 今天 今年 大家 真的 以及 或者 而且 然后 之后 这样 那样 那里 这里 时候 可能 应该 进行 通过 the a an and or of to in on for with is are was were be been this that it its as at by from have has had you your we our they their he she his her not but all can will would about into more than then them there what when who which how just like get got one two new now today').split(' '));
+
+  function extractKeywordsFromTweets(tweets, limit) {
+    const counts = new Map();
+    const add = (w) => {
+      const k = String(w || '').trim();
+      if (k.length < 2 || KEYWORD_STOPWORDS.has(k) || KEYWORD_STOPWORDS.has(k.toLowerCase())) return;
+      counts.set(k, (counts.get(k) || 0) + 1);
+    };
+    for (const t of tweets || []) {
+      let text = String((t && t.text) || '');
+      if (!text) continue;
+      text = text.replace(/https?:\/\/\S+/g, ' ').replace(/@\w+/g, ' ');
+      // hashtag：#词
+      const tags = text.match(/#([^\s#.,!?;:，。！？；：]+)/g) || [];
+      tags.forEach((tag) => add(tag));
+      const plain = text.replace(/#[^\s#.,!?;:，。！？；：]+/g, ' ');
+      // 中文：2-4 字连续中文
+      const zhWords = plain.match(/[\u4e00-\u9fa5]{2,4}/g) || [];
+      zhWords.forEach((w) => add(w));
+      // 英文：3 字母以上的单词
+      const enWords = plain.match(/[A-Za-z][A-Za-z0-9_]{2,}/g) || [];
+      enWords.forEach((w) => add(w.toLowerCase()));
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)
+      .slice(0, limit || 8)
+      .map(([w]) => w);
   }
 
   // 扫当前时间线，按（点赞 + 转发）取前 N 条高互动推文
@@ -245,6 +324,15 @@
     .xa-select { width: 100%; padding: 7px 10px; border: 1px solid #cfd9de; border-radius: 8px; font-size: 13px; margin: 4px 0 8px; background: #fff; }
     .xa-label { font-size: 13px; font-weight: 700; margin-top: 10px; }
     .xa-style-tag { display: inline-block; font-size: 12px; color: #1d9bf0; border: 1px solid #1d9bf0; border-radius: 999px; padding: 1px 8px; margin-bottom: 6px; }
+    .xa-check { display: flex; align-items: center; gap: 6px; font-size: 13px; margin: 6px 0; cursor: pointer; flex: 1; }
+    .xa-check input { accent-color: #1d9bf0; }
+    .xa-row .xa-select { flex: 1; margin: 0; }
+    .xa-btn-secondary { background: #f7f9f9; color: #0f1419; border: 1px solid #cfd9de; margin-top: 8px; }
+    .xa-topic { border: 1px solid #eff3f4; border-radius: 12px; padding: 10px 12px; margin-bottom: 10px; cursor: pointer; }
+    .xa-topic:hover { border-color: #1d9bf0; }
+    .xa-topic-title { font-weight: 700; }
+    .xa-topic-reason { color: #536471; font-size: 13px; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+    .xa-chip.suggested { border-style: dashed; }
     .xa-footer { border-top: 1px solid #eff3f4; padding: 8px 14px; font-size: 12px; color: #536471; display: flex; justify-content: space-between; align-items: center; }
     .xa-footer button { border: none; background: none; color: #1d9bf0; cursor: pointer; font-size: 12px; padding: 0; }
     .xa-footer #xa-version { color: #536471; margin-right: 8px; }
@@ -288,12 +376,23 @@
       '<div class="xa-body">' +
         '<div class="xa-pane" id="pane-reply">' +
           '<div class="xa-tweet" id="reply-tweet"><span class="xa-empty">点一下任意推文，这里会显示推文内容并自动生成回复草稿。</span></div>' +
+          '<div class="xa-label">回复语言</div>' +
+          '<select class="xa-select" id="reply-language">' +
+            '<option value="zh">中文回复</option>' +
+            '<option value="en">English replies</option>' +
+          '</select>' +
+          '<div class="xa-row">' +
+            '<label class="xa-check"><input type="checkbox" id="reply-humanfeel"> 真人感</label>' +
+            '<label class="xa-check"><input type="checkbox" id="reply-growth"> 涨粉模式</label>' +
+          '</div>' +
           '<button class="xa-btn" type="button" id="btn-gen-reply">生成回复</button>' +
           '<div class="xa-status" id="reply-status"></div>' +
           '<div id="reply-list"></div>' +
         '</div>' +
         '<div class="xa-pane hidden" id="pane-trending">' +
           '<button class="xa-btn" type="button" id="btn-grab-trending">抓取热门</button>' +
+          '<button class="xa-btn xa-btn-secondary" type="button" id="btn-topics">今日选题</button>' +
+          '<div id="topic-list"></div>' +
           '<div class="xa-context" id="trending-context"></div>' +
           '<div class="xa-label">热词（点一下选中 / 取消）</div>' +
           '<div class="xa-chips" id="hotword-chips"></div>' +
@@ -307,6 +406,20 @@
             '<option value="专业干货">专业干货</option>' +
             '<option value="幽默">幽默</option>' +
           '</select>' +
+          '<div class="xa-label">开头钩子</div>' +
+          '<select class="xa-select" id="trending-hook">' +
+            '<option value="悬念">悬念</option>' +
+            '<option value="争议">争议</option>' +
+            '<option value="数据">数据</option>' +
+            '<option value="故事">故事</option>' +
+            '<option value="提问">提问</option>' +
+          '</select>' +
+          '<div class="xa-label">出文语言</div>' +
+          '<select class="xa-select" id="trending-language">' +
+            '<option value="zh">中文文案</option>' +
+            '<option value="en">English posts</option>' +
+          '</select>' +
+          '<label class="xa-check"><input type="checkbox" id="trending-thread"> 写成 thread（3-5 条连贯推文）</label>' +
           '<button class="xa-btn" type="button" id="btn-gen-trending">生成文案</button>' +
           '<div class="xa-status" id="trending-status"></div>' +
           '<div id="trending-list"></div>' +
@@ -325,15 +438,23 @@
         trending: panel.querySelector('#pane-trending'),
       },
       replyTweet: panel.querySelector('#reply-tweet'),
+      replyLanguage: panel.querySelector('#reply-language'),
+      replyHumanFeel: panel.querySelector('#reply-humanfeel'),
+      replyGrowth: panel.querySelector('#reply-growth'),
       btnGenReply: panel.querySelector('#btn-gen-reply'),
       replyStatus: panel.querySelector('#reply-status'),
       replyList: panel.querySelector('#reply-list'),
       btnGrabTrending: panel.querySelector('#btn-grab-trending'),
+      btnTopics: panel.querySelector('#btn-topics'),
+      topicList: panel.querySelector('#topic-list'),
       trendingContext: panel.querySelector('#trending-context'),
       hotwordChips: panel.querySelector('#hotword-chips'),
       hotwordInput: panel.querySelector('#hotword-input'),
       btnAddHotword: panel.querySelector('#btn-add-hotword'),
       trendingStyle: panel.querySelector('#trending-style'),
+      trendingHook: panel.querySelector('#trending-hook'),
+      trendingLanguage: panel.querySelector('#trending-language'),
+      trendingThread: panel.querySelector('#trending-thread'),
       btnGenTrending: panel.querySelector('#btn-gen-trending'),
       trendingStatus: panel.querySelector('#trending-status'),
       trendingList: panel.querySelector('#trending-list'),
@@ -355,6 +476,13 @@
     els.btnAddHotword.addEventListener('click', addHotword);
     els.hotwordInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addHotword(); });
     els.btnGenTrending.addEventListener('click', generateTrending);
+    els.replyLanguage.addEventListener('change', () => { panelLanguage = els.replyLanguage.value; els.trendingLanguage.value = panelLanguage; savePanelPrefs(); });
+    els.trendingLanguage.addEventListener('change', () => { panelLanguage = els.trendingLanguage.value; els.replyLanguage.value = panelLanguage; savePanelPrefs(); });
+    els.replyHumanFeel.addEventListener('change', () => { panelHumanFeel = els.replyHumanFeel.checked; savePanelPrefs(); });
+    els.replyGrowth.addEventListener('change', () => { panelGrowthMode = els.replyGrowth.checked; savePanelPrefs(); });
+    els.trendingHook.addEventListener('change', () => { panelHook = els.trendingHook.value; savePanelPrefs(); });
+    els.trendingThread.addEventListener('change', () => { panelThread = els.trendingThread.checked; savePanelPrefs(); });
+    els.btnTopics.addEventListener('click', generateTopics);
     els.btnOptions.addEventListener('click', () => {
       chrome.runtime.sendMessage({ type: 'xAssistantOpenOptions' });
     });
@@ -375,6 +503,24 @@
     els.tabs.forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
     els.panes.reply.classList.toggle('hidden', name !== 'reply');
     els.panes.trending.classList.toggle('hidden', name !== 'trending');
+  }
+
+  // 把面板偏好同步到控件上（启动时读完存储后调一次）
+  function syncPanelPrefs() {
+    if (!els.replyLanguage) return;
+    els.replyLanguage.value = panelLanguage;
+    els.trendingLanguage.value = panelLanguage;
+    els.replyHumanFeel.checked = panelHumanFeel;
+    els.replyGrowth.checked = panelGrowthMode;
+    els.trendingHook.value = panelHook;
+    els.trendingThread.checked = panelThread;
+  }
+
+  // 面板偏好存到 chrome.storage.sync（语言和设置页共用同一个 language 键）
+  function savePanelPrefs() {
+    try {
+      chrome.storage.sync.set({ language: panelLanguage, humanFeel: panelHumanFeel, growthMode: panelGrowthMode, hook: panelHook, thread: panelThread });
+    } catch (_) { /* 忽略 */ }
   }
 
   function setStatus(which, text, isError) {
@@ -409,14 +555,16 @@
   }
 
   function renderReplyTweet() {
-    if (!currentTweet || !currentTweet.text) {
+    if (!currentTweet || (!currentTweet.text && !(currentTweet.images && currentTweet.images.length))) {
       els.replyTweet.innerHTML = '<span class="xa-empty">没抓到推文内容，点一下推文再试。</span>';
       return;
     }
     els.replyTweet.innerHTML =
       '<div><span class="xa-author">' + escapeHtml(currentTweet.author || '未知作者') + '</span>' +
       (currentTweet.handle ? '<span class="xa-handle">' + escapeHtml(currentTweet.handle) + '</span>' : '') + '</div>' +
-      '<div class="xa-text">' + escapeHtml(currentTweet.text) + '</div>';
+      (currentTweet.text
+        ? '<div class="xa-text">' + escapeHtml(currentTweet.text) + '</div>'
+        : '<div class="xa-text xa-empty">这条推文是纯图（没有文字），将按图片内容生成回复。</div>');
   }
 
   // 渲染草稿列表；kind 为 'reply'（带风格标签 + 重新生成）或 'trending'（只有复制）
@@ -427,11 +575,11 @@
     drafts.forEach((text, i) => {
       const item = document.createElement('div');
       item.className = 'xa-draft';
-      // 回复草稿：每条打上风格标签（自然口语 / 专业干货 / 幽默），方便挑
-      if (kind === 'reply' && replyStyles[i]) {
+      // 回复草稿：每条打上风格 + 角度标签（比如“自然口语 · 共鸣”），方便挑
+      if (kind === 'reply' && (replyStyles[i] || replyAngles[i])) {
         const tag = document.createElement('span');
         tag.className = 'xa-style-tag';
-        tag.textContent = replyStyles[i];
+        tag.textContent = [replyStyles[i], replyAngles[i]].filter(Boolean).join(' · ');
         item.appendChild(tag);
       }
       const body = document.createElement('div');
@@ -490,7 +638,7 @@
 
   // 生成回复草稿；auto 为 true 时是点推文后的自动生成（同一条只自动生成一次）
   async function generateReplies(auto) {
-    if (!currentTweet || !currentTweet.text) {
+    if (!currentTweet || (!currentTweet.text && !(currentTweet.images && currentTweet.images.length))) {
       renderReplyTweet();
       setStatus('reply', '没抓到推文内容，点一下推文再试', true);
       return;
@@ -507,7 +655,10 @@
     let res = null;
     try {
       res = await callGenerate('reply', {
-        tweet: { author: currentTweet.author, handle: currentTweet.handle, text: currentTweet.text },
+        tweet: { author: currentTweet.author, handle: currentTweet.handle, text: currentTweet.text, images: currentTweet.images || [] },
+        language: panelLanguage,
+        humanFeel: panelHumanFeel,
+        growthMode: panelGrowthMode,
       });
     } catch (e) {
       res = null;
@@ -520,23 +671,29 @@
     }
     replyDrafts = res.results;
     replyStyles = Array.isArray(res.styles) ? res.styles : [];
+    replyAngles = Array.isArray(res.angles) ? res.angles : [];
     renderDrafts('reply');
-    setStatus('reply', res.model ? '模型：' + res.model : '已生成，自己复制粘贴到 X 回复框里发。');
+    const visionNote = res.vision ? '（已识别图片内容）' : '';
+    setStatus('reply', (res.model ? '模型：' + res.model : '已生成，自己复制粘贴到 X 回复框里发。') + visionNote);
   }
 
   // 单条重新生成：只请求 1 条，替换对应位置
   async function regenerateOne(index, btn) {
-    if (!currentTweet || !currentTweet.text || generating) return;
+    if (!currentTweet || (!currentTweet.text && !(currentTweet.images && currentTweet.images.length)) || generating) return;
     generating = true;
     btn.disabled = true;
     const old = btn.textContent;
     btn.textContent = '生成中…';
     let res = null;
     try {
-      // 单条重新生成：用这条原来对应的风格，保持三条风格各不相同
+      // 单条重新生成：用这条原来对应的风格和角度，保持三条各不相同
       res = await callGenerate('reply', {
-        tweet: { author: currentTweet.author, handle: currentTweet.handle, text: currentTweet.text },
+        tweet: { author: currentTweet.author, handle: currentTweet.handle, text: currentTweet.text, images: currentTweet.images || [] },
         style: replyStyles[index] || undefined,
+        angle: replyAngles[index] || undefined,
+        language: panelLanguage,
+        humanFeel: panelHumanFeel,
+        growthMode: panelGrowthMode,
       }, 1);
     } catch (e) {
       res = null;
@@ -551,6 +708,7 @@
     if (res.results && res.results.length) {
       replyDrafts[index] = res.results[0];
       if (Array.isArray(res.styles) && res.styles[0]) replyStyles[index] = res.styles[0];
+      if (Array.isArray(res.angles) && res.angles[0]) replyAngles[index] = res.angles[0];
       renderDrafts('reply');
     }
   }
@@ -561,9 +719,9 @@
     const box = els.hotwordChips;
     if (!box) return;
     box.innerHTML = '';
-    const addChip = (word, isCustom) => {
+    const addChip = (word, isCustom, isSuggested) => {
       const chip = document.createElement('button');
-      chip.className = 'xa-chip' + (selectedHotWords.has(word) ? ' selected' : '');
+      chip.className = 'xa-chip' + (selectedHotWords.has(word) ? ' selected' : '') + (isSuggested ? ' suggested' : '');
       chip.type = 'button';
       chip.textContent = word;
       if (isCustom) {
@@ -588,8 +746,9 @@
       box.appendChild(chip);
     };
     scrapedTopics.slice(0, 10).forEach((w) => addChip(w, false));
+    suggestedTopics.forEach((w) => addChip(w, false, true));
     customHotWords.forEach((w) => addChip(w, true));
-    if (!scrapedTopics.length && !customHotWords.length) {
+    if (!scrapedTopics.length && !customHotWords.length && !suggestedTopics.length) {
       box.innerHTML = '<span class="xa-empty">还没有热词，点“抓取热门”从 X 抓，或在下面自己添加。</span>';
     }
   }
@@ -607,14 +766,16 @@
     renderHotwordChips();
   }
 
-  // 抓取热门：只抓热搜话题 + 高互动推文，展示成可点的热词，不直接生成；
-  // 等用户选好热词、选好风格，再点“生成文案”。
+  // 抓取热门：抓热搜话题（按帖子数排，最热在前）+ 高互动推文，再从推文里提关键词，
+  // 一起展示成可点的热词，不直接生成；等用户选好热词、选好风格，再点“生成文案”。
   function grabTrending() {
     if (generating) return;
     const topics = extractTrendingTopics();
     const top = extractTopTweets(TRENDING_TOP_N);
     trendingContext = { topics, tweets: top };
-    scrapedTopics = topics;
+    // 从高互动推文里提关键词，补到热搜话题后面（去掉和热搜重复的）
+    const keywords = extractKeywordsFromTweets(top, 8).filter((w) => !topics.some((t) => t.toLowerCase() === String(w).toLowerCase()));
+    scrapedTopics = [...topics, ...keywords];
 
     if (!topics.length && !top.length) {
       els.trendingContext.innerHTML = '';
@@ -631,7 +792,80 @@
     selectedHotWords = new Set(topics.slice(0, 3));
     customHotWords.forEach((w) => selectedHotWords.add(w));
     renderHotwordChips();
-    setStatus('trending', topics.length ? '已抓到 ' + topics.length + ' 个热搜话题，选好热词和风格后点“生成文案”。' : '没抓到热搜话题，可以自己添加热词再生成。');
+    setStatus('trending', topics.length
+      ? '已抓到 ' + topics.length + ' 个热搜话题（按热度排序）' + (keywords.length ? '和 ' + keywords.length + ' 个推文关键词' : '') + '，选好热词和风格后点“生成文案”。'
+      : '没抓到热搜话题，可以自己添加热词再生成。');
+  }
+
+  // 今日选题：根据已抓的热点话题 + 高互动推文，让 AI 给出今天值得写的 3 个选题。
+  // 没抓过热点时先自动抓一次。点一个选题就把它加进热词，再点“生成文案”。
+  async function generateTopics() {
+    if (generating) return;
+    if (!trendingContext) grabTrending();
+    const topics = scrapedTopics.slice(0, 10);
+    const top = trendingContext ? trendingContext.tweets : [];
+    if (!topics.length && !top.length) {
+      setStatus('trending', '先点“抓取热门”，抓到内容后再生成选题', true);
+      return;
+    }
+    generating = true;
+    els.btnTopics.disabled = true;
+    setStatus('trending', '正在想今天的选题…');
+    let res = null;
+    try {
+      res = await callGenerate('topics', {
+        topics,
+        tweets: (top || []).map((t) => ({ text: t.text, likes: t.likes })),
+        language: panelLanguage,
+      });
+    } catch (e) {
+      res = null;
+    }
+    generating = false;
+    els.btnTopics.disabled = false;
+    if (!res || !res.ok) {
+      setStatus('trending', (res && res.error) || FALLBACK_ERROR, true);
+      return;
+    }
+    topicSuggestions = res.results || [];
+    renderTopics();
+    setStatus('trending', '已生成今日选题，点一个就能把它加进热词，再点“生成文案”。');
+  }
+
+  // 渲染今日选题列表：每条是“一句话选题 + 为什么值得写”，点一下加进热词
+  function renderTopics() {
+    const box = els.topicList;
+    if (!box) return;
+    box.innerHTML = '';
+    topicSuggestions.forEach((raw) => {
+      const text = sanitizeDraft(raw);
+      if (!text) return;
+      // 拆成标题和原因：原因行以“为什么值得写”或 "Why it is worth writing" 开头
+      const m = text.match(/^[\s\S]*?\n\s*(为什么值得写|Why it is worth writing)\s*[:：]?\s*([\s\S]*)$/);
+      const title = (m ? text.slice(0, text.indexOf('\n')) : text).replace(/^(选题\s*\d+|Topic\s*\d+)\s*[:：]\s*/, '').trim();
+      const reason = m ? m[2].trim() : '';
+      if (!title) return;
+      const item = document.createElement('div');
+      item.className = 'xa-topic';
+      const titleEl = document.createElement('div');
+      titleEl.className = 'xa-topic-title';
+      titleEl.textContent = title;
+      item.appendChild(titleEl);
+      if (reason) {
+        const reasonEl = document.createElement('div');
+        reasonEl.className = 'xa-topic-reason';
+        reasonEl.textContent = (panelLanguage === 'en' ? 'Why: ' : '为什么值得写：') + reason;
+        item.appendChild(reasonEl);
+      }
+      item.addEventListener('click', () => {
+        if (!suggestedTopics.includes(title)) suggestedTopics.push(title);
+        selectedHotWords.add(title);
+        renderHotwordChips();
+        setStatus('trending', '已把「' + title + '」加进热词，选好风格后点“生成文案”。');
+        if (els.btnGenTrending) els.btnGenTrending.scrollIntoView({ block: 'nearest' });
+      });
+      box.appendChild(item);
+    });
   }
 
   // 生成热门文案：用选中的热词 + 选中的风格 + 高互动推文作参考
@@ -652,6 +886,9 @@
         topics,
         tweets: (top || []).map((t) => ({ text: t.text, likes: t.likes })),
         style: els.trendingStyle ? els.trendingStyle.value : undefined,
+        language: panelLanguage,
+        hook: panelHook,
+        thread: panelThread,
       });
     } catch (e) {
       res = null;
@@ -664,7 +901,7 @@
     }
     trendingDrafts = res.results;
     renderDrafts('trending');
-    setStatus('trending', res.model ? '模型：' + res.model : '已生成，自己复制粘贴到 X 发帖框里发。');
+    setStatus('trending', (res.model ? '模型：' + res.model + '。' : '') + (panelThread ? '已生成 thread（' + trendingDrafts.length + ' 条），按顺序复制发。' : '已生成，自己复制粘贴到 X 发帖框里发。'));
   }
 
   // ================= 捕获触发 =================
@@ -683,7 +920,7 @@
     const article = e.target.closest ? e.target.closest('article[data-testid="tweet"]') : null;
     if (!article) return;
     const tweet = extractTweet(article);
-    if (tweet && tweet.text) onTweetCaptured(tweet, true);
+    if (tweet && (tweet.text || (tweet.images && tweet.images.length))) onTweetCaptured(tweet, true);
   }
 
   // 详情页加载后（SPA 跳转无整页刷新），延迟抓主推文
@@ -692,7 +929,7 @@
     setTimeout(() => {
       if (!isStatusPage()) return;
       const tweet = getDetailMainTweet();
-      if (tweet && tweet.text) {
+      if (tweet && (tweet.text || (tweet.images && tweet.images.length))) {
         // 只在推文变了时才重新生成
         if (!currentTweet || tweetKey(tweet) !== tweetKey(currentTweet)) {
           onTweetCaptured(tweet, true);
@@ -720,7 +957,7 @@
         timer = null;
         if (!isStatusPage()) return;
         const tweet = getDetailMainTweet();
-        if (tweet && tweet.text && (!currentTweet || tweetKey(tweet) !== tweetKey(currentTweet))) {
+        if (tweet && (tweet.text || (tweet.images && tweet.images.length)) && (!currentTweet || tweetKey(tweet) !== tweetKey(currentTweet))) {
           onTweetCaptured(tweet, true);
         }
       }, 600);

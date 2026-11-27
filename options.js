@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS = {
   count: 3,
   domain: '',
   style: '自然口语',
+  language: 'zh', // 默认出文语言：zh 中文 / en English
 };
 
 const $ = (id) => document.getElementById(id);
@@ -48,6 +49,7 @@ chrome.storage.sync.get(DEFAULT_SETTINGS, (items) => {
   $('count').value = items.count;
   $('domain').value = items.domain;
   $('style').value = items.style;
+  $('language').value = items.language;
   updateSections();
 });
 
@@ -68,6 +70,7 @@ $('save').addEventListener('click', () => {
     count,
     domain: $('domain').value.trim() || DEFAULT_SETTINGS.domain,
     style: $('style').value,
+    language: $('language').value,
   }, () => {
     const saved = $('saved');
     saved.style.display = 'inline';
