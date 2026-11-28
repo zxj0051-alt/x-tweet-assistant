@@ -162,14 +162,15 @@ function buildPrompts(task, payload, settings, count) {
         ? `Draft ${i + 1}: ${styleHintFor(s, 'en')} style, from the "${displayAngle(a)}" angle (${angleHintFor(a, 'en')})`
         : `第${i + 1}条用${styleHintFor(s)}风格，从「${a}」的角度写（${angleHintFor(a)}）`;
     }).join(lang === 'en' ? '; ' : '；');
-    const visionText = images.length
+    // 只有纯图（几乎没有文字）才需要看图；有文字的图文推文不走视觉识别（见 callAi）
+    const visionText = images.length && !text.trim()
       ? (lang === 'en'
         ? 'The tweet includes images — look at them first, then write replies based on the images together with the text; if there is almost no text, reply based on what is in the images. '
         : '推文配了图片，先看懂图片内容，再结合图片和文字写回复；如果推文几乎没有文字，就按图片内容回。')
       : '';
     const sys = lang === 'en'
-      ? `You are the X account operator assistant for ${persona}. Write reply drafts for the tweet below: in English, don't sound like an ad; you can resonate, ask a question, or add a small viewpoint; don't hard-sell, don't make fortune-telling claims, don't use a superstitious tone. Each draft 30-120 words. ${perDraft}. ${visionText}${humanFeelText}${growthText}Output JSON only, example format: {"drafts":["full text of draft 1","full text of draft 2","full text of draft 3"]}. Don't add any other text, don't number the drafts, don't use keys like "draft1".`
-      : `你是${persona}的 X 账号运营助手。给下面这条推文写回复草稿：中文，不要像广告；可以共鸣、提问、补充一个小观点；不要生硬推销、不要算命断言、不要迷信口吻。每条 30-120 字。${perDraft}。${visionText}${humanFeelText}${growthText}只输出 JSON，格式示例：{"drafts":["这是第一条草稿的全文","这是第二条草稿的全文","这是第三条草稿的全文"]}。不要加任何其他文字，不要给草稿编号，不要用"草稿1"这样的键名。`;
+      ? `You are the X account operator assistant for ${persona}. Write reply drafts for the tweet below: in English, don't sound like an ad; you can resonate, ask a question, or add a small viewpoint; don't hard-sell, don't make fortune-telling claims, don't use a superstitious tone. Do not @ the author or include any @mentions; do not add hashtags. Format: one sentence per line, separated by line breaks, without trailing periods; mirror the original tweet's line-break style. Each draft 30-120 words. ${perDraft}. ${visionText}${humanFeelText}${growthText}Output JSON only, example format: {"drafts":["full text of draft 1","full text of draft 2","full text of draft 3"]}. Don't add any other text, don't number the drafts, don't use keys like "draft1".`
+      : `你是${persona}的 X 账号运营助手。给下面这条推文写回复草稿：中文，不要像广告；可以共鸣、提问、补充一个小观点；不要生硬推销、不要算命断言、不要迷信口吻。不要 @ 作者、不要带任何 @提及；不要加 #话题标签。排版：一句话一行，用换行分句，不要用“。”结尾；参考原推文的排版风格。每条 30-120 字。${perDraft}。${visionText}${humanFeelText}${growthText}只输出 JSON，格式示例：{"drafts":["这是第一条草稿的全文","这是第二条草稿的全文","这是第三条草稿的全文"]}。不要加任何其他文字，不要给草稿编号，不要用"草稿1"这样的键名。`;
     const user = lang === 'en'
       ? `Author: ${t.author || ''} ${t.handle || ''}\nTweet:\n${text}`
       : `作者：${t.author || ''} ${t.handle || ''}\n推文：\n${text}`;
@@ -204,12 +205,24 @@ function buildPrompts(task, payload, settings, count) {
       : '写成一个 thread：输出 3-5 条前后连贯的推文，组成一个完整的小长文，每条承接上一条、层层递进。')
     : '';
   const sys = lang === 'en'
-    ? `You are the X account operator assistant for ${persona}. Based on the hot topics and popular tweets below on X, write new post copy: in English, ${styleHint}, ${hookText}. ${threadText}${angle} Don't hard-sell, don't make fortune-telling claims, don't use a superstitious tone. Each post 60-180 words. Output JSON only, example format: {"drafts":["full text of post 1","full text of post 2","full text of post 3"]}. Don't add any other text, don't number the posts, don't use keys like "post1", and don't write "1/5" style numbering inside the text.`
-    : `你是${persona}的 X 账号运营助手。根据下面 X 上的热门话题和热门推文，写新的发帖文案：中文、${styleHint}、${hookText}。${threadText}${angle}不要生硬推销、不要算命断言、不要迷信口吻。每条 60-180 字。只输出 JSON，格式示例：{"drafts":["这是第一条文案的全文","这是第二条文案的全文","这是第三条文案的全文"]}。不要加任何其他文字，不要给文案编号，不要用"文案1"这样的键名，也不要在正文里写"1/5"这样的编号。`;
+    ? `You are the X account operator assistant for ${persona}. Based on the hot topics and popular tweets below on X, write new post copy: in English, ${styleHint}, ${hookText}. ${threadText}${angle} Don't hard-sell, don't make fortune-telling claims, don't use a superstitious tone. Format: one sentence per line, separated by line breaks, without trailing periods. Each post 60-180 words. Output JSON only, example format: {"drafts":["full text of post 1","full text of post 2","full text of post 3"]}. Don't add any other text, don't number the posts, don't use keys like "post1", and don't write "1/5" style numbering inside the text.`
+    : `你是${persona}的 X 账号运营助手。根据下面 X 上的热门话题和热门推文，写新的发帖文案：中文、${styleHint}、${hookText}。${threadText}${angle}不要生硬推销、不要算命断言、不要迷信口吻。排版：一句话一行，用换行分句，不要用“。”结尾。每条 60-180 字。只输出 JSON，格式示例：{"drafts":["这是第一条文案的全文","这是第二条文案的全文","这是第三条文案的全文"]}。不要加任何其他文字，不要给文案编号，不要用"文案1"这样的键名，也不要在正文里写"1/5"这样的编号。`;
   const user = lang === 'en'
     ? `Hot topics: ${topics.join('; ') || 'none'}\nPopular tweets:\n${tweets.map((x, i) => `${i + 1}. ${x}`).join('\n') || 'none'}`
     : `热门话题：${topics.join('；') || '无'}\n热门推文：\n${tweets.map((x, i) => `${i + 1}. ${x}`).join('\n') || '无'}`;
   return { sys, user, styles: [displayStyle(styleRaw || ALL_STYLES[0])], angles: [] };
+}
+
+// 成稿定型：保证回复/文案符合排版要求（模型提示词可能被忽略，这里再强制兜底）。
+// reply：去掉 @提及和 #话题标签；reply/trending：一句话一行（中文句号“。”改换行），去掉空行。
+function formatDraft(text, task) {
+  let t = String(text || '');
+  if (task === 'reply') {
+    t = t.replace(/@[A-Za-z0-9_\u4e00-\u9fa5]+/g, '');
+    t = t.replace(/#[^\s#.,!?;:，。！？；：]+/g, '');
+  }
+  t = t.replace(/。/g, '\n');
+  return t.split('\n').map((l) => l.trim()).filter(Boolean).join('\n');
 }
 
 // 带超时的 fetch（超时后 AbortController 取消请求）
@@ -375,8 +388,10 @@ async function callAi(task, payload, settings, countOverride) {
   if (task === 'topics') count = 3;
   if (task === 'trending' && payload.thread) count = Math.min(5, Math.max(3, count));
   try {
-    // 纯图/带图回复：不论当前 provider 是谁，都走 GLM-4V-Flash 视觉识别
-    if (task === 'reply' && payload.tweet && Array.isArray(payload.tweet.images) && payload.tweet.images.length) {
+    // 只有纯图（几乎没有文字）才走 GLM-4V-Flash 视觉识别；有文字的图文推文走正常提供商，不再报图片识别错误
+    const tweetText = String((payload.tweet && payload.tweet.text) || '').trim();
+    const hasImages = payload.tweet && Array.isArray(payload.tweet.images) && payload.tweet.images.length > 0;
+    if (task === 'reply' && hasImages && !tweetText) {
       return await callGlmVision(task, payload, settings, count);
     }
     if (settings.provider === 'gemini') return await callGemini(task, payload, settings, count);
@@ -385,6 +400,7 @@ async function callAi(task, payload, settings, countOverride) {
     if (settings.provider === 'siliconflow') return await callSiliconFlow(task, payload, settings, count);
     return await callGlm(task, payload, settings, count); // 默认智谱 GLM
   } catch (err) {
+    if (err && err.name === 'AbortError') return { ok: false, error: '请求超时（60 秒），请检查网络后重试' };
     return { ok: false, error: '后端未就绪/请求失败，请稍后再试' };
   }
 }
@@ -394,6 +410,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       const settings = await getSettings();
       const result = await callAi(message.task, message.payload || {}, settings, message.count);
+      // 成稿定型后再回给面板（覆盖所有提供商，包括 Worker）
+      if (result && result.ok && Array.isArray(result.results)) {
+        result.results = result.results.map((d) => formatDraft(d, message.task));
+      }
       sendResponse(result);
     })();
     return true; // 异步回包
